@@ -5,6 +5,8 @@ Fine-tuning Mistral-7B через QLoRA
 Зависимости
 pip install -q -U bitsandbytes
 pip install -q transformers==4.40.0 peft==0.10.0 accelerate==0.29.3 datasets trl==0.8.6 scipy
+
+Авторизация W&B
 """
 
 import os
@@ -14,7 +16,7 @@ import math
 import torch
 from datetime import datetime
 
-# Проверка GPU до импорта bitsandbytes
+# ── Проверка GPU до импорта bitsandbytes ──────────────────────────────────────
 # bitsandbytes при импорте ищет CUDA .so; без GPU-рантайма падает с triton ошибкой.
 if not torch.cuda.is_available():
     print("❌ CUDA недоступна!")
@@ -26,6 +28,7 @@ print(f"✅ GPU: {torch.cuda.get_device_name(0)}")
 
 import bitsandbytes  # noqa: F401 — импортируем явно ДО peft, чтобы убедиться что .so загружен
 
+import wandb
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
@@ -45,7 +48,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ─────────────────────────────────────────
 # Конфигурация
+# ─────────────────────────────────────────
+
 MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
 OUTPUT_DIR = "./mistral-qlora-adapter"
 TRAIN_FILE = "train.jsonl"
@@ -80,7 +86,8 @@ TRAIN_CONFIG = dict(
     save_total_limit=2,
     fp16=True,                       # Mixed precision для T4
     optim="paged_adamw_8bit",        # Экономия памяти оптимизатора
-    report_to="none",                # Без wandb (можно включить)
+    report_to="wandb",               # Логирование в Weights & Biases
+    run_name="mistral-7b-qlora",     # Имя запуска в W&B
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     greater_is_better=False,
@@ -91,7 +98,10 @@ TRAIN_CONFIG = dict(
 PROMPT_TEMPLATE = "<s>[INST] {instruction} [/INST] {response} </s>"
 
 
+# ─────────────────────────────────────────
 # Загрузка данных
+# ─────────────────────────────────────────
+
 def load_jsonl(path):
     examples = []
     with open(path, "r", encoding="utf-8") as f:
@@ -116,19 +126,22 @@ def prepare_datasets():
     print("📂 Загрузка данных...")
     train_raw = load_jsonl(TRAIN_FILE)
     val_raw = load_jsonl(VAL_FILE)
- 
+
     train_formatted = format_examples(train_raw)
     val_formatted = format_examples(val_raw)
- 
+
     train_ds = Dataset.from_list(train_formatted)
     val_ds = Dataset.from_list(val_formatted)
- 
+
     print(f"   Train: {len(train_ds)} примеров")
     print(f"   Val:   {len(val_ds)} примеров")
     return train_ds, val_ds
 
 
+# ─────────────────────────────────────────
 # Загрузка модели в 4-bit (QLoRA)
+# ─────────────────────────────────────────
+
 def load_quantized_model():
     print(f"\n🔧 Загрузка {MODEL_ID} в 4-bit...")
 
@@ -158,7 +171,10 @@ def load_quantized_model():
     return model, tokenizer
 
 
+# ─────────────────────────────────────────
 # Применение LoRA адаптеров
+# ─────────────────────────────────────────
+
 def apply_lora(model):
     print("\n🔌 Применение LoRA адаптеров...")
 
@@ -174,7 +190,10 @@ def apply_lora(model):
     return model
 
 
+# ─────────────────────────────────────────
 # Loss logging callback
+# ─────────────────────────────────────────
+
 class LossLoggerCallback(TrainerCallback):
     def __init__(self):
         self.train_losses = []
@@ -224,7 +243,10 @@ class LossLoggerCallback(TrainerCallback):
         return fig
 
 
+# ─────────────────────────────────────────
 # Обучение
+# ─────────────────────────────────────────
+
 def train():
     print("=" * 60)
     print("ШАГ 2: Fine-tuning Mistral-7B через QLoRA")
@@ -235,12 +257,31 @@ def train():
     gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"🖥️  GPU: {gpu_name} ({gpu_mem:.0f} GB)")
 
+    # Загрузка данных
     train_ds, val_ds = prepare_datasets()
 
+    # Загрузка модели
     model, tokenizer = load_quantized_model()
 
     # LoRA
     model = apply_lora(model)
+
+    # ─── W&B инициализация ───
+    wandb.init(
+        project="mistral-qlora-finetune",
+        name="mistral-7b-qlora",
+        config={
+            "model": MODEL_ID,
+            "lora_r": LORA_CONFIG["r"],
+            "lora_alpha": LORA_CONFIG["lora_alpha"],
+            "lora_dropout": LORA_CONFIG["lora_dropout"],
+            "target_modules": LORA_CONFIG["target_modules"],
+            **TRAIN_CONFIG,
+            "max_seq_length": 512,
+            "quantization": "nf4-4bit",
+        },
+        tags=["qlora", "mistral-7b", "instruction-tuning"],
+    )
 
     # Аргументы обучения
     training_args = TrainingArguments(
@@ -261,11 +302,11 @@ def train():
         args=training_args,
         dataset_text_field="text",
         max_seq_length=512,
-        packing=False,
+        packing=False,           # Не упаковываем примеры (разные длины)
         callbacks=[loss_callback],
     )
 
-    # Запуск обучения
+    # ─── Запуск обучения ───
     print(f"\n🚀 Начало обучения...")
     print(f"   Эпох: {TRAIN_CONFIG['num_train_epochs']}")
     print(f"   Эффективный batch size: {TRAIN_CONFIG['per_device_train_batch_size'] * TRAIN_CONFIG['gradient_accumulation_steps']}")
@@ -274,8 +315,9 @@ def train():
 
     train_result = trainer.train()
 
+    # ─── Сохранение адаптера ───
     print(f"\n💾 Сохранение LoRA адаптера...")
-
+    # Сохраняем ТОЛЬКО адаптер (не всю модель)
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
@@ -289,7 +331,7 @@ def train():
     print(f"   Размер адаптера: {adapter_size_mb:.1f} MB")
     print(f"   (базовая модель ~14 GB не сохраняется)")
 
-    # Метрики
+    # ─── Метрики ───
     metrics = train_result.metrics
     print(f"\n📈 Результаты обучения:")
     print(f"   Train loss (финальный): {metrics.get('train_loss', 'N/A'):.4f}")
@@ -301,10 +343,10 @@ def train():
     print(f"   Val loss (финальный): {eval_metrics['eval_loss']:.4f}")
     print(f"   Val perplexity: {math.exp(eval_metrics['eval_loss']):.2f}")
 
-    # График loss
+    # ─── График loss ───
     loss_callback.plot_and_save("loss_curve.png")
 
-    # Сохранение метрик в JSON
+    # ─── Сохранение метрик в JSON ───
     all_metrics = {
         "train_loss": metrics.get("train_loss"),
         "eval_loss": eval_metrics["eval_loss"],
@@ -328,10 +370,30 @@ def train():
         json.dump(all_metrics, f, indent=2, ensure_ascii=False)
     print("📋 Метрики сохранены: training_metrics.json")
 
+    # ─── W&B финализация ───
+    wandb.summary.update({
+        "final_train_loss": metrics.get("train_loss"),
+        "final_eval_loss": eval_metrics["eval_loss"],
+        "final_eval_perplexity": math.exp(eval_metrics["eval_loss"]),
+        "adapter_size_mb": adapter_size_mb,
+        "trainable_params": 41_943_040,
+        "trainable_params_pct": 0.58,
+    })
+    # Логируем loss curve как артефакт
+    artifact = wandb.Artifact("loss-curve", type="plot")
+    artifact.add_file("loss_curve.png")
+    wandb.log_artifact(artifact)
+    wandb.finish()
+    print("📊 W&B run завершён. График и метрики загружены в wandb.ai")
+
     print(f"\n✅ Шаг 2 завершён. Время: {datetime.now().strftime('%H:%M:%S')}")
     return trainer, model, tokenizer
 
+
+# ─────────────────────────────────────────
 # Быстрый тест после обучения
+# ─────────────────────────────────────────
+
 def quick_test(model, tokenizer, prompts=None):
     """Быстрая проверка качества дообученной модели."""
     if prompts is None:
