@@ -1,0 +1,40 @@
+{
+  "train_loss": 1.214981829325358,
+  "eval_loss": 1.565901279449463,
+  "eval_perplexity": 4.786987405606696,
+  "train_losses_history": [
+    2.7362,
+    1.7903,
+    1.4705,
+    1.0064,
+    0.8574,
+    0.4826,
+    0.5241
+  ],
+  "eval_losses_history": [
+    1.399430751800537,
+    1.565901279449463
+  ],
+  "train_steps": [
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70
+  ],
+  "eval_steps": [
+    50,
+    75
+  ],
+  "config": {
+    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "learning_rate": 0.0002,
+    "epochs": 3,
+    "batch_size": 2,
+    "grad_accum": 4
+  }
+}
